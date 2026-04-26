@@ -1,2 +1,2 @@
 # ultrasimpleproxy
-really simple proxy programm
+really simple proxy program
