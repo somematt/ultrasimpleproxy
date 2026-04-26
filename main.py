@@ -45,41 +45,73 @@ def handle_tcp_client(client_socket, dst_host, dst_port):
 
 # ====================== UDP FORWARD ======================
 def handle_udp_forward(src_host, src_port, dst_host, dst_port):
-    udp_sock = None
+    local_sock = None
+    remote_sock = None
     try:
-        udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        udp_sock.bind((src_host, src_port))
-        
-        udp_sockets.append(udp_sock)  # Сохраняем для закрытия
-        
-        log(f"UDP Forward started: {src_host}:{src_port} → {dst_host}:{dst_port}")
+        # Socket that listens for Studio client on 127.0.0.1
+        local_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        local_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        local_sock.bind((src_host, src_port))
+        local_sock.settimeout(1.0)
 
-        while running:
-            try:
-                data, addr = udp_sock.recvfrom(8192)
-                if not data:
-                    continue
-                udp_sock.sendto(data, (dst_host, dst_port))
-                
-                # Получаем ответ
+        # Socket that talks to the remote host
+        remote_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        remote_sock.settimeout(1.0)
+
+        udp_sockets.extend([local_sock, remote_sock])
+
+        log(f"UDP Forward started: {src_host}:{src_port} -> {dst_host}:{dst_port}")
+
+        client_addr = [None]
+        packets_sent = [0]
+        packets_recv = [0]
+
+        # Thread: Studio -> Host
+        def to_remote():
+            while running:
                 try:
-                    response, _ = udp_sock.recvfrom(8192, socket.MSG_DONTWAIT)
-                    udp_sock.sendto(response, addr)
-                except:
-                    pass  # Нет ответа — нормально для некоторых UDP протоколов
-            except:
-                if running:
+                    data, addr = local_sock.recvfrom(65535)
+                    client_addr[0] = addr
+                    remote_sock.sendto(data, (dst_host, dst_port))
+                    packets_sent[0] += 1
+                    log(f"[>>] {len(data)}b sent to {dst_host}:{dst_port}")
+                except socket.timeout:
                     continue
+                except Exception as e:
+                    if running:
+                        log(f"UDP to_remote error: {e}")
+
+        # Thread: Host -> Studio
+        def to_local():
+            while running:
+                try:
+                    data, addr = remote_sock.recvfrom(65535)
+                    if client_addr[0]:
+                        local_sock.sendto(data, client_addr[0])
+                        packets_recv[0] += 1
+                        log(f"[<<] {len(data)}b recv from {addr}")
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    if running:
+                        log(f"UDP to_local error: {e}")
+
+        t1 = threading.Thread(target=to_remote, daemon=True)
+        t2 = threading.Thread(target=to_local, daemon=True)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
     except Exception as e:
         log(f"UDP Error: {e}")
     finally:
-        if udp_sock and udp_sock in udp_sockets:
-            udp_sockets.remove(udp_sock)
-        try:
-            udp_sock.close()
-        except:
-            pass
+        for s in [local_sock, remote_sock]:
+            if s:
+                try:
+                    s.close()
+                except:
+                    pass
 
 
 # ====================== HTTP PROXY MODE ======================
